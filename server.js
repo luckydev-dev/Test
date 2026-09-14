@@ -1,13 +1,30 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const publicDir = path.join(__dirname, 'public');
 const port = Number(process.env.PORT || 3000);
-const requestTimeout = 18000;
+const requestTimeout = Number(process.env.SNAPP_UPSTREAM_TIMEOUT || 18000);
+
+// The UI assets live in `public/`. Locally that directory sits next to this
+// file, but a serverless bundle can place it one or two levels up, so probe a
+// few candidates instead of assuming a single layout.
+const publicDirCandidates = [
+  path.join(__dirname, 'public'),
+  path.join(__dirname, '..', 'public'),
+  path.join(__dirname, '..', '..', 'public'),
+  path.join(process.cwd(), 'public')
+];
+
+let cachedPublicDir = null;
+function getPublicDir() {
+  if (cachedPublicDir) return cachedPublicDir;
+  cachedPublicDir = publicDirCandidates.find((candidate) => fs.existsSync(path.join(candidate, 'index.html')))
+    || publicDirCandidates[0];
+  return cachedPublicDir;
+}
 
 const CONTENT_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -446,6 +463,7 @@ async function handleMedia(request, response, requestUrl, forceDownload = false)
 }
 
 function serveStatic(request, response, pathname) {
+  const publicDir = getPublicDir();
   const requestedPath = pathname === '/' ? '/index.html' : pathname;
   const safePath = path.normalize(requestedPath).replace(/^\.\.(\/|\\|$)/, '');
   const filePath = path.join(publicDir, safePath);
@@ -469,7 +487,7 @@ function serveStatic(request, response, pathname) {
   });
 }
 
-const server = http.createServer(async (request, response) => {
+export async function handleRequest(request, response) {
   const requestUrl = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
 
   if (request.method === 'POST' && requestUrl.pathname === '/api/resolve') {
@@ -493,8 +511,17 @@ const server = http.createServer(async (request, response) => {
     return;
   }
   sendJson(response, 405, { error: 'Method not allowed.' });
-});
+}
 
-server.listen(port, '0.0.0.0', () => {
-  console.log(`Snapp is running on http://0.0.0.0:${port}`);
-});
+export default handleRequest;
+
+// Start the standalone server only when this file is the entry point. On
+// Vercel the module is imported by the `api/index.js` function instead.
+const isEntryPoint = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (isEntryPoint) {
+  const server = http.createServer(handleRequest);
+  server.listen(port, '0.0.0.0', () => {
+    console.log(`Snapp is running on http://0.0.0.0:${port}`);
+  });
+}
